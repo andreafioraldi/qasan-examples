@@ -1,0 +1,9 @@
+Real mode x86 firmware #1
+=========================
+
+The allocator is powered by QASan using the x86 backdoor.
+See the header for the API.
+
+It can be built with the standard gcc distributed with linux distros but keep in
+mind that this is an hack. I you add a lot of code, consider to use a cross
+compiler.
