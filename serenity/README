@@ -6,3 +6,5 @@ example.
 
 Copy kmalloc.cpp into serenity/Kernel/Heap (and maybe before that save the old
 kmalloc.cpp) and then follow the build instructions of Serenity.
+
+To run set the SERENITY_QEMU_BIN env var to the path of qasan-qemu-system.
