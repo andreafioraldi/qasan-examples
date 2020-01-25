@@ -1,0 +1,8 @@
+SerenityOS allocator with QASan
+===============================
+
+This is the SerenityOs allocator adapted in the same way of the baremetal
+example.
+
+Copy kmalloc.cpp into serenity/Kernel/Heap (and maybe before that save the old
+kmalloc.cpp) and then follow the build instructions of Serenity.
