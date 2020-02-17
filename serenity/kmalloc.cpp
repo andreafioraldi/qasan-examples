@@ -1,4 +1,30 @@
 /*
+ * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/*
  * Really really *really* Q&D malloc() and free() implementations
  * just to get going. Don't ever let anyone see this shit. :^)
  */
@@ -16,12 +42,42 @@
 //  QEMU AddressSanitizer
 // ---------------------------------------
 
+
 enum {
   QASAN_ACTION_CHECK_LOAD,
   QASAN_ACTION_CHECK_STORE,
   QASAN_ACTION_POISON,
+  QASAN_ACTION_USER_POISON,
   QASAN_ACTION_UNPOISON,
+  QASAN_ACTION_ALLOC,
+  QASAN_ACTION_DEALLOC,
+  QASAN_ACTION_ENABLE,
+  QASAN_ACTION_DISABLE,
+  QASAN_ACTION_SWAP_STATE,
 };
+
+/* shadow map byte values */
+#define ASAN_VALID 0x00
+#define ASAN_PARTIAL1 0x01
+#define ASAN_PARTIAL2 0x02
+#define ASAN_PARTIAL3 0x03
+#define ASAN_PARTIAL4 0x04
+#define ASAN_PARTIAL5 0x05
+#define ASAN_PARTIAL6 0x06
+#define ASAN_PARTIAL7 0x07
+#define ASAN_ARRAY_COOKIE 0xac
+#define ASAN_STACK_RZ 0xf0
+#define ASAN_STACK_LEFT_RZ 0xf1
+#define ASAN_STACK_MID_RZ 0xf2
+#define ASAN_STACK_RIGHT_RZ 0xf3
+#define ASAN_STACK_FREED 0xf5
+#define ASAN_STACK_OOSCOPE 0xf8
+#define ASAN_GLOBAL_RZ 0xf9
+#define ASAN_HEAP_RZ 0xe9
+#define ASAN_USER 0xf7
+#define ASAN_HEAP_LEFT_RZ 0xfa
+#define ASAN_HEAP_RIGHT_RZ 0xfb
+#define ASAN_HEAP_FREED 0xfd
 
 extern "C" void* qasan_backdoor(int, void*, void*, void*);
 asm (
@@ -55,28 +111,41 @@ asm (
   QASAN_CALL2(QASAN_ACTION_CHECK_LOAD, ptr, len)
 #define QASAN_STORE(ptr, len) \
   QASAN_CALL2(QASAN_ACTION_CHECK_STORE, ptr, len)
-#define QASAN_POISON(ptr, len) \
-  QASAN_CALL2(QASAN_ACTION_POISON, ptr, len)
+
+#define QASAN_POISON(ptr, len, poison_byte) \
+  QASAN_CALL3(QASAN_ACTION_POISON, ptr, len, poison_byte)
+#define QASAN_USER_POISON(ptr, len) \
+  QASAN_CALL2(QASAN_ACTION_USER_POISON, ptr, len)
 #define QASAN_UNPOISON(ptr, len) \
   QASAN_CALL2(QASAN_ACTION_UNPOISON, ptr, len)
+
+#define QASAN_ALLOC(start, end) \
+  QASAN_CALL2(QASAN_ACTION_ALLOC, start, end)
+#define QASAN_DEALLOC(ptr) \
+  QASAN_CALL1(QASAN_ACTION_DEALLOC, ptr)
+
+#define QASAN_SWAP(state) \
+  QASAN_CALL1(QASAN_ACTION_SWAP_STATE, state)
 
 #define REDZONE_SIZE 32
 
 // ---------------------------------------
 
-#define SANITIZE_KMALLOC
+// #define SANITIZE_KMALLOC
 
 struct [[gnu::packed]] allocation_t
 {
     size_t start;
     size_t nchunk;
+    size_t qasan_size;
+    size_t _pad;
 };
 
-#define BASE_PHYSICAL (4 * MB)
+#define BASE_PHYSICAL (0xc0000000 + (4 * MB))
 #define CHUNK_SIZE 8
 #define POOL_SIZE (3 * MB)
 
-#define ETERNAL_BASE_PHYSICAL (2 * MB)
+#define ETERNAL_BASE_PHYSICAL (0xc0000000 + (2 * MB))
 #define ETERNAL_RANGE_SIZE (2 * MB)
 
 static u8 alloc_map[POOL_SIZE / CHUNK_SIZE / 8];
@@ -102,6 +171,11 @@ bool is_kmalloc_address(const void* ptr)
 void kmalloc_init()
 {
     memset(&alloc_map, 0, sizeof(alloc_map));
+    
+    // this routine is called more than one time
+    // Serenity uses Triple fault to reboot sveral times at startup
+    QASAN_UNPOISON((void*)BASE_PHYSICAL, POOL_SIZE);
+    
     memset((void*)BASE_PHYSICAL, 0, POOL_SIZE);
 
     kmalloc_sum_eternal = 0;
@@ -154,7 +228,7 @@ void* kmalloc_impl(size_t size)
     }
 
     // We need space for the allocation_t structure at the head of the block.
-    size_t real_size = size + (REDZONE_SIZE*2) + sizeof(allocation_t);
+    size_t real_size = size + sizeof(allocation_t) + REDZONE_SIZE*2;
 
     if (sum_free < real_size) {
         dump_backtrace();
@@ -193,6 +267,7 @@ void* kmalloc_impl(size_t size)
                     ptr += sizeof(allocation_t);
                     a->nchunk = chunks_needed;
                     a->start = first_chunk;
+                    a->qasan_size = size;
 
                     for (size_t k = first_chunk; k < (first_chunk + chunks_needed); ++k) {
                         alloc_map[k / 8] |= 1 << (k % 8);
@@ -203,10 +278,11 @@ void* kmalloc_impl(size_t size)
 #ifdef SANITIZE_KMALLOC
                     memset(ptr, 0xbb, (a->nchunk * CHUNK_SIZE) - sizeof(allocation_t));
 #endif
-
-                    QASAN_POISON(ptr, REDZONE_SIZE);
-                    QASAN_POISON(ptr + REDZONE_SIZE + size, REDZONE_SIZE);
-                    return ptr + REDZONE_SIZE;
+                    u8* r_ptr = ptr + REDZONE_SIZE;
+                    QASAN_POISON(ptr, REDZONE_SIZE, ASAN_HEAP_LEFT_RZ);
+                    QASAN_POISON(r_ptr + size, chunks_needed * CHUNK_SIZE -size -REDZONE_SIZE -sizeof(allocation_t), ASAN_HEAP_RIGHT_RZ);
+                    QASAN_ALLOC(r_ptr, r_ptr + size);
+                    return r_ptr;
                 }
             } else {
                 // This is in use, so restart chunks_here counter.
@@ -235,12 +311,14 @@ void kfree(void* ptr)
 
     sum_alloc -= a->nchunk * CHUNK_SIZE;
     sum_free += a->nchunk * CHUNK_SIZE;
-    
+
 #ifdef SANITIZE_KMALLOC
-    QASAN_UNPOISON(a, a->nchunk * CHUNK_SIZE);
     memset(a, 0xaa, a->nchunk * CHUNK_SIZE);
 #endif
-    QASAN_POISON(a, a->nchunk * CHUNK_SIZE);
+    QASAN_DEALLOC(ptr);
+    QASAN_POISON(a, a->nchunk * CHUNK_SIZE, ASAN_HEAP_FREED);
+
+    //*(char*)ptr=0; // fake bug
 }
 
 void* krealloc(void* ptr, size_t new_size)
@@ -251,7 +329,7 @@ void* krealloc(void* ptr, size_t new_size)
     InterruptDisabler disabler;
 
     auto* a = (allocation_t*)((((u8*)ptr) - sizeof(allocation_t) - REDZONE_SIZE));
-    size_t old_size = a->nchunk * CHUNK_SIZE;
+    size_t old_size = a->qasan_size;
 
     if (old_size == new_size)
         return ptr;

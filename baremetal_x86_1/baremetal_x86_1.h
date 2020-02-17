@@ -30,7 +30,13 @@ enum {
   QASAN_ACTION_CHECK_LOAD,
   QASAN_ACTION_CHECK_STORE,
   QASAN_ACTION_POISON,
+  QASAN_ACTION_USER_POISON,
   QASAN_ACTION_UNPOISON,
+  QASAN_ACTION_ALLOC,
+  QASAN_ACTION_DEALLOC,
+  QASAN_ACTION_ENABLE,
+  QASAN_ACTION_DISABLE,
+  QASAN_ACTION_SWAP_STATE,
 };
 
 void* qasan_backdoor(int, void*, void*, void*);
@@ -49,7 +55,7 @@ void* qasan_backdoor(int, void*, void*, void*);
 #define QASAN_STORE(ptr, len) \
   QASAN_CALL2(QASAN_ACTION_CHECK_STORE, ptr, len)
 #define QASAN_POISON(ptr, len) \
-  QASAN_CALL2(QASAN_ACTION_POISON, ptr, len)
+  QASAN_CALL2(QASAN_ACTION_USER_POISON, ptr, len)
 #define QASAN_UNPOISON(ptr, len) \
   QASAN_CALL2(QASAN_ACTION_UNPOISON, ptr, len)
 

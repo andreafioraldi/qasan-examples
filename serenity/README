@@ -13,5 +13,3 @@ From the run script in Kernel/ remove this line:
 
 [ -e /dev/kvm -a -r /dev/kvm -a -w /dev/kvm ] && SERENITY_KVM_ARG="-enable-kvm"
 
-This is WIP at the moment, you will not be able to boot SerenityOS under QASan
-but I'm working on it.
